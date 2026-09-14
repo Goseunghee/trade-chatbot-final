@@ -1,21 +1,18 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
-from typing import Optional
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from pathlib import Path
-from datetime import datetime
-import pandas as pd
-import re
-
+from typing import Optional
+import csv
 
 app = FastAPI(
     title="Trade Chatbot API",
-    description="무역 데이터 조회 및 챗봇 API",
+    description="무역 데이터 기반 챗봇 + CRUD API",
     version="1.0.0"
 )
 
-# CORS 설정
+# CORS 허용
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,241 +21,414 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 파일 경로
 BASE_DIR = Path(__file__).resolve().parent
-DATA_FILE = BASE_DIR / "trade_data_long.csv"   # 네 CSV 파일명에 맞게 수정 가능
-INDEX_FILE = BASE_DIR / "index.html"
+CSV_FILE = BASE_DIR / "data" / "trade_data_long.csv"
 
-REQUIRED_COLUMNS = [
-    "country",
-    "date",
-    "year_month",
-    "export_value",
-    "import_value",
-    "trade_balance"
+INDEX_CANDIDATES = [
+    BASE_DIR / "index.html",
+    BASE_DIR / "templates" / "index.html",
+    BASE_DIR / "static" / "index.html",
 ]
 
-COUNTRY_ALIASES = {
-    "미국": "미국",
-    "usa": "미국",
-    "united states": "미국",
-    "us": "미국",
-    "한국": "한국",
-    "대한민국": "한국",
-    "korea": "한국",
-    "south korea": "한국",
-    "중국": "중국",
-    "china": "중국",
-    "일본": "일본",
-    "japan": "일본"
-}
 
-
-# ---------------------------
-# Pydantic Models
-# ---------------------------
+# ----------------------------
+# Pydantic 모델
+# ----------------------------
 class AskRequest(BaseModel):
     question: str
 
 
-class TradeDataCreate(BaseModel):
+class TradeCreate(BaseModel):
     country: str
     date: str
     year_month: str
-    export_value: int
-    import_value: int
+    export_value: int = Field(ge=0)
+    import_value: int = Field(ge=0)
+    trade_balance: Optional[int] = None
 
 
-class TradeDataUpdate(BaseModel):
+class TradeUpdate(BaseModel):
     date: Optional[str] = None
-    export_value: Optional[int] = None
-    import_value: Optional[int] = None
+    export_value: Optional[int] = Field(default=None, ge=0)
+    import_value: Optional[int] = Field(default=None, ge=0)
+    trade_balance: Optional[int] = None
 
 
-# ---------------------------
-# Utility Functions
-# ---------------------------
-def ensure_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """필수 컬럼을 맞추고 타입을 정리"""
-    for col in REQUIRED_COLUMNS:
-        if col not in df.columns:
-            df[col] = None
+# ----------------------------
+# 공통 유틸
+# ----------------------------
+def normalize_metric_name(metric: str) -> Optional[str]:
+    metric = (metric or "").strip().lower()
 
-    df = df.copy()
+    if metric in ["export_value", "수출", "수출금액", "export"]:
+        return "export_value"
+    if metric in ["import_value", "수입", "수입금액", "import"]:
+        return "import_value"
+    if metric in ["trade_balance", "무역수지", "balance"]:
+        return "trade_balance"
 
-    df["country"] = df["country"].fillna("").astype(str)
-    df["date"] = df["date"].fillna("").astype(str)
-    df["year_month"] = df["year_month"].fillna("").astype(str)
-
-    df["export_value"] = pd.to_numeric(df["export_value"], errors="coerce").fillna(0).astype(int)
-    df["import_value"] = pd.to_numeric(df["import_value"], errors="coerce").fillna(0).astype(int)
-
-    # year_month가 비어 있으면 date에서 생성
-    for idx in df.index:
-        if not df.at[idx, "year_month"] and df.at[idx, "date"]:
-            df.at[idx, "year_month"] = str(df.at[idx, "date"])[:7]
-
-    df["trade_balance"] = df["export_value"] - df["import_value"]
-
-    return df[REQUIRED_COLUMNS]
-
-
-def load_data() -> pd.DataFrame:
-    """CSV 읽기"""
-    if not DATA_FILE.exists():
-        empty_df = pd.DataFrame(columns=REQUIRED_COLUMNS)
-        return ensure_dataframe(empty_df)
-
-    try:
-        df = pd.read_csv(DATA_FILE, encoding="utf-8-sig")
-    except UnicodeDecodeError:
-        df = pd.read_csv(DATA_FILE, encoding="cp949")
-
-    return ensure_dataframe(df)
-
-
-def save_data(df: pd.DataFrame) -> None:
-    """CSV 저장"""
-    df = ensure_dataframe(df)
-    df.to_csv(DATA_FILE, index=False, encoding="utf-8-sig")
-
-
-def normalize_country(country: str) -> str:
-    """국가명 정규화"""
-    if not country:
-        return ""
-    key = country.strip().lower()
-    return COUNTRY_ALIASES.get(key, country.strip())
-
-
-def extract_country(question: str, df: pd.DataFrame) -> Optional[str]:
-    """질문에서 국가 추출"""
-    q = question.lower()
-
-    for alias, country in COUNTRY_ALIASES.items():
-        if alias in q:
-            return country
-
-    countries = df["country"].dropna().astype(str).unique().tolist()
-    for country in countries:
-        if country and country.lower() in q:
-            return country
+    if "수출" in metric:
+        return "export_value"
+    if "수입" in metric:
+        return "import_value"
+    if "무역수지" in metric:
+        return "trade_balance"
 
     return None
 
 
-def extract_year_month(question: str) -> Optional[str]:
-    """질문에서 YYYY-MM 추출"""
-    # 예: 2026-07, 2026/7, 2026년 7월
-    match = re.search(r"(20\d{2})\D{0,2}(\d{1,2})", question)
-    if not match:
-        return None
-
-    year = match.group(1)
-    month = int(match.group(2))
-
-    if 1 <= month <= 12:
-        return f"{year}-{month:02d}"
-
-    return None
+def calculate_trade_balance(export_value: int, import_value: int) -> int:
+    return export_value - import_value
 
 
-def row_to_dict(row) -> dict:
-    """Pandas row를 JSON 직렬화 가능한 dict로 변환"""
-    return {
-        "country": str(row["country"]),
-        "date": str(row["date"]),
-        "year_month": str(row["year_month"]),
-        "export_value": int(row["export_value"]),
-        "import_value": int(row["import_value"]),
-        "trade_balance": int(row["trade_balance"]),
-    }
+def format_number(value: int) -> str:
+    return f"{value:,}"
 
 
-def find_latest_row(df: pd.DataFrame, country: Optional[str] = None):
-    """최신 데이터 찾기"""
-    temp_df = df.copy()
+def load_trades():
+    """
+    long 형식 CSV:
+    country,metric,unit,date,value,year_month,metric_std
 
-    if country:
-        temp_df = temp_df[temp_df["country"] == country]
+    를 읽어서 wide 형식 리스트로 변환:
+    [
+      {
+        "country": "미국",
+        "date": "2026-07-01",
+        "year_month": "2026-07",
+        "export_value": 17474061,
+        "import_value": 8967205,
+        "trade_balance": 8506856
+      }
+    ]
+    """
+    if not CSV_FILE.exists():
+        return []
 
-    if temp_df.empty:
-        return None
+    grouped = {}
 
-    temp_df = temp_df.sort_values(by=["year_month", "date"], ascending=False)
-    return temp_df.iloc[0]
+    with open(CSV_FILE, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
 
+        for row in reader:
+            country = (row.get("country") or "").strip()
+            date = (row.get("date") or "").strip()
+            year_month = (row.get("year_month") or "").strip()
+            metric_raw = row.get("metric_std") or row.get("metric") or ""
+            metric_key = normalize_metric_name(metric_raw)
+            value_raw = row.get("value", "0")
 
-def find_exact_row(df: pd.DataFrame, country: str, year_month: str):
-    """국가 + 년월 일치 데이터 찾기"""
-    matched = df[(df["country"] == country) & (df["year_month"] == year_month)]
-    if matched.empty:
-        return None
-    return matched.iloc[0]
+            if not country or not year_month or not metric_key:
+                continue
 
+            try:
+                value = int(float(value_raw))
+            except ValueError:
+                value = 0
 
-def format_trade_answer(row, intent: str) -> str:
-    """챗봇 답변 문장 생성"""
-    country = row["country"]
-    year_month = row["year_month"]
-    export_value = int(row["export_value"])
-    import_value = int(row["import_value"])
-    trade_balance = int(row["trade_balance"])
+            key = (country, year_month)
 
-    if intent == "latest_trade":
-        return (
-            f"{country}의 최신 데이터는 {year_month} 기준입니다. "
-            f"수출은 {export_value:,}, 수입은 {import_value:,}, "
-            f"무역수지는 {trade_balance:,}입니다."
+            if key not in grouped:
+                grouped[key] = {
+                    "country": country,
+                    "date": date,
+                    "year_month": year_month,
+                    "export_value": 0,
+                    "import_value": 0,
+                    "trade_balance": 0,
+                }
+
+            if date:
+                grouped[key]["date"] = date
+
+            grouped[key][metric_key] = value
+
+    rows = list(grouped.values())
+
+    # 무역수지는 일관성 있게 재계산
+    for row in rows:
+        row["trade_balance"] = calculate_trade_balance(
+            row["export_value"],
+            row["import_value"]
         )
 
+    rows.sort(key=lambda x: (x["country"], x["year_month"]))
+    return rows
+
+
+def save_trades(rows):
+    """
+    wide 형식 rows를 다시 long 형식 CSV로 저장
+    CSV 원본 형식:
+    country,metric,unit,date,value,year_month,metric_std
+    """
+    CSV_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    long_rows = []
+    rows = sorted(rows, key=lambda x: (x["country"], x["year_month"]))
+
+    for row in rows:
+        export_value = int(row["export_value"])
+        import_value = int(row["import_value"])
+        trade_balance = int(row.get("trade_balance", export_value - import_value))
+
+        long_rows.append({
+            "country": row["country"],
+            "metric": "수출금액",
+            "unit": "천불",
+            "date": row["date"],
+            "value": export_value,
+            "year_month": row["year_month"],
+            "metric_std": "export_value",
+        })
+        long_rows.append({
+            "country": row["country"],
+            "metric": "수입금액",
+            "unit": "천불",
+            "date": row["date"],
+            "value": import_value,
+            "year_month": row["year_month"],
+            "metric_std": "import_value",
+        })
+        long_rows.append({
+            "country": row["country"],
+            "metric": "무역수지",
+            "unit": "천불",
+            "date": row["date"],
+            "value": trade_balance,
+            "year_month": row["year_month"],
+            "metric_std": "trade_balance",
+        })
+
+    with open(CSV_FILE, "w", encoding="utf-8-sig", newline="") as f:
+        fieldnames = ["country", "metric", "unit", "date", "value", "year_month", "metric_std"]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(long_rows)
+
+
+def classify_intent(question: str) -> str:
+    q = (question or "").strip()
+
+    # "최신" 질문은 전체 요약으로 우선 처리
+    if "최신" in q or "최근" in q:
+        return "latest_trade"
+    if "수출" in q:
+        return "export_value"
+    if "수입" in q:
+        return "import_value"
+    if "무역수지" in q:
+        return "trade_balance"
+
+    return "latest_trade"
+
+
+def extract_country(question: str, trades: list) -> Optional[str]:
+    q = (question or "").strip()
+    countries = sorted({row["country"] for row in trades}, key=len, reverse=True)
+
+    for country in countries:
+        if country and country in q:
+            return country
+
+    # 질문에 국가가 없으면 미국 우선, 없으면 첫 국가
+    if "미국" in countries:
+        return "미국"
+    return countries[0] if countries else None
+
+
+def get_latest_trade_by_country(country: str, trades: list):
+    filtered = [row for row in trades if row["country"] == country]
+    if not filtered:
+        return None
+    return max(filtered, key=lambda x: x["year_month"])
+
+
+def find_trade(country: str, year_month: str, trades: list):
+    for row in trades:
+        if row["country"] == country and row["year_month"] == year_month:
+            return row
+    return None
+
+
+def build_answer(intent: str, trade: dict) -> str:
+    country = trade["country"]
+    year_month = trade["year_month"]
+    export_value = format_number(trade["export_value"])
+    import_value = format_number(trade["import_value"])
+    trade_balance = format_number(trade["trade_balance"])
+
+    if intent == "export_value":
+        return f"{country}의 최신 수출 데이터는 {year_month} 기준 {export_value}천불입니다."
+    if intent == "import_value":
+        return f"{country}의 최신 수입 데이터는 {year_month} 기준 {import_value}천불입니다."
+    if intent == "trade_balance":
+        return f"{country}의 최신 무역수지는 {year_month} 기준 {trade_balance}천불입니다."
+
     return (
-        f"{country}의 {year_month} 무역 데이터입니다. "
-        f"수출은 {export_value:,}, 수입은 {import_value:,}, "
-        f"무역수지는 {trade_balance:,}입니다."
+        f"{country}의 최신 데이터는 {year_month} 기준입니다. "
+        f"수출은 {export_value}, 수입은 {import_value}, 무역수지는 {trade_balance}입니다."
     )
 
 
-def save_to_firestore(payload: dict) -> bool:
+def try_save_to_firestore(question: str, answer: str, trade: dict) -> bool:
     """
-    Firestore 저장 시도
-    - 설정이 없거나 패키지가 없으면 False 반환
+    Firestore 연결 안 했으면 false 반환
+    필요하면 나중에 여기만 바꾸면 됨
     """
-    try:
-        import firebase_admin
-        from firebase_admin import firestore
-
-        if not firebase_admin._apps:
-            firebase_admin.initialize_app()
-
-        db = firestore.client()
-        db.collection("trade_chat_logs").add(payload)
-        return True
-
-    except Exception:
-        return False
+    return False
 
 
-def handle_trade_question(question: str, df: pd.DataFrame):
-    """질문 분석 후 적절한 데이터 반환"""
-    if df.empty:
+# ----------------------------
+# 페이지 라우팅
+# ----------------------------
+@app.get("/", include_in_schema=False)
+def home():
+    for path in INDEX_CANDIDATES:
+        if path.exists():
+            return FileResponse(path)
+    return {
+        "message": "Trade Chatbot API 실행 중입니다.",
+        "docs": "/docs"
+    }
+
+
+# ----------------------------
+# 챗봇 API
+# ----------------------------
+@app.post("/ask")
+def ask_question(request: AskRequest):
+    trades = load_trades()
+    if not trades:
         raise HTTPException(status_code=404, detail="무역 데이터가 없습니다.")
 
-    country = extract_country(question, df)
-    year_month = extract_year_month(question)
+    intent = classify_intent(request.question)
+    country = extract_country(request.question, trades)
 
-    # 최신 데이터 요청
-    if "최신" in question or "latest" in question.lower():
-        row = find_latest_row(df, country)
-        if row is None:
-            raise HTTPException(status_code=404, detail="해당 국가의 최신 데이터를 찾을 수 없습니다.")
-        return row, "latest_trade"
+    if not country:
+        raise HTTPException(status_code=404, detail="질문에서 국가를 찾을 수 없습니다.")
 
-    # 특정 월 요청
-    if country and year_month:
-        row = find_exact_row(df, country, year_month)
-        if row is None:
-            raise HTTPException(status_code=404, detail="해당 국가와 월의 데이터를 찾을 수 없습니다.")
-        return row, "monthly_trade"
+    latest_trade = get_latest_trade_by_country(country, trades)
+    if not latest_trade:
+        raise HTTPException(status_code=404, detail=f"{country} 데이터가 없습니다.")
 
-    # 국가만 있고 월이 없으면 최신 데이터 반환
+    answer = build_answer(intent, latest_trade)
+    firestore_saved = try_save_to_firestore(request.question, answer, latest_trade)
+
+    return {
+        "intent": intent,
+        "question": request.question,
+        "answer": answer,
+        "data": latest_trade,
+        "firestore_saved": firestore_saved
+    }
+
+
+# ----------------------------
+# CRUD API
+# ----------------------------
+@app.get("/trades")
+def get_trades():
+    return load_trades()
+
+
+@app.get("/trades/{country}/{year_month}")
+def get_trade(country: str, year_month: str):
+    trades = load_trades()
+    trade = find_trade(country, year_month, trades)
+
+    if not trade:
+        raise HTTPException(status_code=404, detail="데이터를 찾을 수 없습니다.")
+
+    return trade
+
+
+@app.post("/trades")
+def create_trade(payload: TradeCreate):
+    trades = load_trades()
+
+    existing = find_trade(payload.country, payload.year_month, trades)
+    if existing:
+        raise HTTPException(status_code=400, detail="이미 같은 국가와 연월 데이터가 존재합니다.")
+
+    trade_balance = (
+        payload.trade_balance
+        if payload.trade_balance is not None
+        else calculate_trade_balance(payload.export_value, payload.import_value)
+    )
+
+    new_row = {
+        "country": payload.country,
+        "date": payload.date,
+        "year_month": payload.year_month,
+        "export_value": payload.export_value,
+        "import_value": payload.import_value,
+        "trade_balance": trade_balance,
+    }
+
+    trades.append(new_row)
+    save_trades(trades)
+
+    return {
+        "message": "데이터가 생성되었습니다.",
+        "data": new_row
+    }
+
+
+@app.put("/trades/{country}/{year_month}")
+def update_trade(country: str, year_month: str, payload: TradeUpdate):
+    trades = load_trades()
+    trade = find_trade(country, year_month, trades)
+
+    if not trade:
+        raise HTTPException(status_code=404, detail="수정할 데이터를 찾을 수 없습니다.")
+
+    if payload.date is not None:
+        trade["date"] = payload.date
+    if payload.export_value is not None:
+        trade["export_value"] = payload.export_value
+    if payload.import_value is not None:
+        trade["import_value"] = payload.import_value
+
+    if payload.trade_balance is not None:
+        trade["trade_balance"] = payload.trade_balance
+    else:
+        trade["trade_balance"] = calculate_trade_balance(
+            trade["export_value"],
+            trade["import_value"]
+        )
+
+    save_trades(trades)
+
+    return {
+        "message": "데이터가 수정되었습니다.",
+        "data": trade
+    }
+
+
+@app.delete("/trades/{country}/{year_month}")
+def delete_trade(country: str, year_month: str):
+    trades = load_trades()
+    new_trades = [
+        row for row in trades
+        if not (row["country"] == country and row["year_month"] == year_month)
+    ]
+
+    if len(new_trades) == len(trades):
+        raise HTTPException(status_code=404, detail="삭제할 데이터를 찾을 수 없습니다.")
+
+    save_trades(new_trades)
+
+    return {
+        "message": "데이터가 삭제되었습니다.",
+        "country": country,
+        "year_month": year_month
+    }
+
+
+# ----------------------------
+# 실행용
+# ----------------------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
