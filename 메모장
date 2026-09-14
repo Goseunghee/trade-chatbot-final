@@ -1,0 +1,18 @@
+uvicorn main:app --host 0.0.0.0 --port 8000
+ 사용자가 보는 웹앱 화면
+http://127.0.0.1:8000/
+스와글 링크-개발자나 발표자가 백엔드 기능을 검증하는 화면
+http://127.0.0.1:8000/docs
+헬스체크
+http://127.0.0.1:8000/health
+Swagger
+http://127.0.0.1:8000/docs
+git config --global user.name "Goseunghee"
+git config --global user.email "hhs2310@naver.com"
+{
+  "question": "미국 최신 무역수지 알려줘"
+}
+이 프로젝트는 FastAPI와 CSV 데이터를 활용한 무역 데이터 챗봇입니다.
+사용자가 국가별 무역 정보를 자연어로 질문하면 최신 수출, 수입, 무역수지를 반환합니다.
+또한 CRUD API를 구현하여 데이터 생성, 조회, 수정, 삭제도 가능합니다.
+메인 페이지에서는 사용자 기능을 보여주고, Swagger에서는 API 구조를 확인할 수 있습니다.
