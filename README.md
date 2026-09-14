@@ -323,7 +323,8 @@ project/
 └── .env
 ```
 
-### 6-1. 🚦 Router
+### 6-1. 🚦 Router  = API 주소를 기능별로 나눠주는 역할
+예 : (user_router → 회원 관련 API/ data_router → 데이터 관련 API)
 
 Router는 클라이언트의 HTTP 요청을 받아 적절한 기능으로 연결하는 역할을 한다.
 
