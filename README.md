@@ -641,7 +641,7 @@ AI가 실제 서비스 데이터를 기반으로 답변할 수 있다.
 
 ## 12. 🌐 CORS
 
-### 12-1. CORS란?
+### 12-1. CORS란? CORS는 다른 주소에서 내 FastAPI 서버에 접근해도 되는지 허용하는 기능
 
 CORS(Cross-Origin Resource Sharing)는 서로 다른 출처(Origin)의 웹 페이지가 API 서버에 요청할 수 있도록 허용하는 정책이다.
 
